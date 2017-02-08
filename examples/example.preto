@@ -1,0 +1,32 @@
+package example
+
+option java_package "java_pkg_name"
+option go_package "go_pkg_name"
+option (myoption) "some_option"
+
+msg FirstMessage
+  field_a str 1
+
+msg Container
+  foo str 1
+  bar int 2      [deprecated] # auto interpolation of "true"?
+  complex int 99 [foo_options.opt1=123,foo_options.opt2="baz"]
+
+  # i am comment
+  bob bytes 8 # hahaha
+  foo map[str]int 4
+  bar []int 3
+
+  # whoa I am nested message
+  msg NestedMessage
+    str sound 1
+
+  enum TheEnum
+    ONE 1
+    # hai
+    THREE 3
+    TWO 2
+
+  oneof something
+    first_thing     str 1
+    or_second_thing str 3

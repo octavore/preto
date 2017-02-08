@@ -1,0 +1,32 @@
+package example;
+
+option java_package = "java_pkg_name";
+option go_package = "go_pkg_name";
+option (myoption) = "some_option";
+
+message FirstMessage {
+    optional string field_a = 1;
+}
+message Container {
+    optional string foo = 1;
+    optional int bar = 2 [deprecated]; // auto interpolation of "true"?
+    optional int complex = 99 [foo_options.opt1=123,foo_options.opt2="baz"];
+    // i am comment
+    optional bytes bob = 8; // hahaha
+    map<string, int> foo = 4;
+    repeated int bar = 3;
+    // whoa I am nested message
+    message NestedMessage {
+        optional sound str = 1;
+    }
+    enum TheEnum {
+        ONE = 1;
+        // hai
+        THREE = 3;
+        TWO = 2;
+    }
+    oneof something {
+        optional string first_thing = 1;
+        optional string or_second_thing = 3;
+    }
+}
