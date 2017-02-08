@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 )
 
 type itemType int
@@ -76,15 +75,12 @@ func main() {
 	}
 
 	l := lexer{buf: bufio.NewReader(f), c: make(chan item)}
-	go func() {
-		p := parser{w: os.Stdout, c: l.c}
-		p.parse()
-		for s := range l.c {
-			fmt.Printf("%s: %q\n", s.t, s.s)
-		}
-	}()
-	l.lex()
-	time.Sleep(time.Second)
+	go l.lex()
+	p := parser{w: os.Stdout, c: l.c}
+	p.parse()
+	// for s := range l.c {
+	// 	fmt.Printf("%s: %q\n", s.t, s.s)
+	// }
 }
 
 type lexer struct {
@@ -153,7 +149,7 @@ func readNum(l reader) string {
 
 func readAlphanum(l reader) string {
 	return readFunc(l, func(ch rune) bool {
-		return isLetter(ch) || isNumber(ch) || ch == '_'
+		return isLetter(ch) || isNumber(ch) || ch == '_' || ch == '.'
 	})
 }
 
@@ -249,10 +245,10 @@ func scanIndent(l *lexer) scanFn {
 		l.emit(itemWhitespace, ws)
 	}
 	// check for comment
-	ch := l.read()
+	peek := l.read()
 	l.unread()
-	if ch == '#' {
-		return scanEnd
+	if peek == '#' {
+		return scanEnd // todo: scanComment?
 	}
 
 	identType := itemUnknown
@@ -294,11 +290,10 @@ func scanFileOption(l *lexer) scanFn {
 
 func scanField(l *lexer) scanFn {
 	ch := l.read()
+	l.unread()
 	if isNumber(ch) {
-		_ = readWhitespace(l)
 		return scanFieldNum
 	}
-	l.unread()
 	return scanFieldType
 }
 
@@ -338,6 +333,7 @@ func scanFieldOptions(l *lexer) scanFn {
 	return scanEnd
 }
 
+// scan until end, comment or newlines
 func scanEnd(l *lexer) scanFn {
 	_ = readWhitespace(l)
 	ch := l.read()
@@ -367,11 +363,35 @@ func isNumber(ch rune) bool {
 // PARSER
 
 type parser struct {
-	c <-chan item
-	w io.Writer
+	c    <-chan item
+	head *item
+	w    io.Writer
 
 	line   int
 	indent int
+}
+
+// return the next item. what to do when channel closes?
+func (p *parser) next() item {
+	o := item{}
+	if p.head != nil {
+		o = *p.head
+		p.head = nil
+	} else {
+		o = <-p.c
+	}
+	// fmt.Println(">> ", o.t.String(), o.s)
+	return o
+}
+
+// peek at the next item
+func (p *parser) peek() item {
+	if p.head != nil {
+		return *p.head
+	}
+	i := p.next()
+	p.head = &i
+	return i
 }
 
 func (p *parser) write(lvl int, s string) {
@@ -387,106 +407,134 @@ func (p *parser) writef(lvl int, f string, args ...interface{}) {
 
 // toplevel parse
 func (p *parser) parse() {
-	for i := range p.c {
+	for {
+		i := p.peek()
 		switch i.t {
+		case itemUnknown:
+			return
 		case itemNewline:
 			p.write(0, "\n")
-			p.line += 1
-			continue
+			p.line++
+			p.next()
 		case itemWhitespace:
-			panic("should not have whitespace")
+			p.parseNewline()
 		case itemPackage:
-			p.writef(0, "package %s", i.s)
+			p.writef(0, "package %s;", i.s)
+			p.next()
 		case itemOption:
 			j := <-p.c
 			if j.t != itemOptionName {
 				panic("parser: expected option value")
 			}
 			p.writef(0, "option %s = %s;", i.s, j.s)
+			p.next()
 		case itemEnum:
+			// parseEnum()
 		case itemCommentStart:
 			// printComment(i)
 		case itemMessageType:
-			p.parseMessage(i, 0, p.c)
+			p.parseMessage(0)
 		}
 	}
 	p.write(0, "\n")
 }
-func (p *parser) parseNewline(c <-chan item) {
-	nl := <-c
+
+func (p *parser) consumeNewlines() {
+	for p.peek().t == itemNewline {
+		p.next()
+		// p.line++ // ??
+		// p.indent = 0
+	}
+}
+
+func (p *parser) parseNewline() {
+	nl := p.next()
 	for nl.t == itemWhitespace {
-		nl = <-c
+		nl = p.next()
 	}
 	if nl.t != itemNewline {
 		panic("parser: expected newline, got " + nl.t.String())
 	}
 	p.write(0, "\n")
-	p.line += 1
+	p.line++
 	p.indent = 0
 }
 
-func (p *parser) parseMessage(i item, lvl int, c <-chan item) {
+func (p *parser) parseMessage(lvl int) {
+	i := p.next()
 	if i.t != itemMessageType {
 		panic("expected message type")
 	}
-	p.writef(lvl, "message %s {\n", i.s)
-	for j := range c {
-		// basically in here we wanted something
-		// indented, either a field or enum or oneof or message
-		if len(j.s) < lvl {
+	p.writef(lvl, "message %s {", i.s)
+	p.parseNewline()
+	messageLevel := 0
+	for {
+		j := p.peek()
+		if j.t == itemNewline {
+			p.consumeNewlines()
+			continue
+		}
+		if j.t != itemWhitespace {
 			break
 		}
-		if len(j.s) > lvl {
-			p.parseMessageInner(len(j.s), c)
+		// basically in here we wanted something
+		// indented, either a field or enum or oneof or message
+		if messageLevel == 0 {
+			messageLevel = len(j.s)
 		}
+		if len(j.s) < messageLevel {
+			break
+		}
+		p.next()
+		p.parseMessageInner(messageLevel)
 	}
-	p.write(lvl, "}")
+	p.write(lvl, "}\n")
 }
 
-func (p *parser) parseMessageInner(lvl int, c <-chan item) {
-	i := <-c
+func toProtoType(t string) string {
+	switch t {
+	case "str":
+		return "string"
+	}
+	return t
+}
+
+func convertType(s string) string {
+	if strings.HasPrefix(s, "map[") {
+		i := strings.Index(s, "]")
+		s = fmt.Sprintf("map<%s, %s>",
+			toProtoType(s[4:i]),
+			toProtoType(s[i+1:]),
+		)
+		return s
+	}
+
+	o := "optional"
+	if strings.HasPrefix(s, "[]") {
+		o = "repeated"
+		s = toProtoType(s[2:])
+	} else {
+		s = toProtoType(s)
+	}
+	return o + " " + s
+}
+
+func (p *parser) parseMessageInner(lvl int) {
+	i := p.peek()
 	switch i.t {
 	case itemCommentStart:
 		p.writef(lvl, "// %s", strings.TrimLeft(i.s, "# "))
-		p.parseNewline(c)
+		p.next()
+		p.parseNewline()
 		return
-	case itemIdentifier:
-		fieldType := <-c
-		if fieldType.t != itemFieldType {
-			panic("parser: expected field type but got " + fieldType.t.String())
-		}
-		fieldNum := <-c
-		if fieldNum.t != itemFieldNum {
-			panic("parser expected field num")
-		}
-		// todo: convert type
-		p.writef(lvl, "%s %s = %s", fieldType.s, i.s, fieldNum.s)
-
-		// parse remainder of line
-		rem := <-c
-		if rem.t == itemFieldOption {
-			p.writef(0, " [%s]", rem.s)
-			rem = <-c
-		}
-
-		switch rem.t {
-		case itemCommentStart:
-			p.writef(0, "; // %s", strings.TrimLeft(rem.s, "# "))
-			p.parseNewline(c)
-			return
-		case itemNewline:
-			p.write(0, ";\n")
-			p.line += 1
-			return
-		default:
-			panic("parser: unknown field comment")
-		}
+	case itemIdentifier: // IDENT FIELDTYPE FIELDNUM
+		p.parseField(lvl)
 	case itemEnum:
-		panic("enum not implemented")
+		p.parseEnum(lvl)
 	case itemMessageType:
-		panic("nested message not handled")
+		p.parseMessage(lvl)
 	case itemOneof:
-		panic("oneof not handled")
+		p.parseOneof(lvl)
 	case itemNewline:
 		break
 	default:
@@ -494,12 +542,118 @@ func (p *parser) parseMessageInner(lvl int, c <-chan item) {
 	}
 }
 
-func (p *parser) parseEnum(lvl int, i item) {
-	if i.t != itemEnum {
-		panic("expected enum type")
+func (p *parser) parseField(lvl int) {
+	ident := p.next() // consume the peeked token
+	if ident.t != itemIdentifier {
+		panic("expected identifier")
+	}
+	fieldType := p.next()
+	if fieldType.t != itemFieldType {
+		panic("parser: expected field type but got " + fieldType.t.String())
+	}
+	fieldNum := p.next()
+	if fieldNum.t != itemFieldNum {
+		panic("parser expected field num")
+	}
+	p.writef(lvl, "%s %s = %s", convertType(fieldType.s), ident.s, fieldNum.s)
+
+	// parse remainder of line
+	rem := p.next()
+	if rem.t == itemFieldOption {
+		p.writef(0, " [%s]", rem.s)
+		rem = p.next()
+	}
+
+	switch rem.t {
+	case itemCommentStart:
+		p.writef(0, "; // %s", strings.TrimLeft(rem.s, "# "))
+		p.parseNewline()
+		return
+	case itemNewline:
+		p.write(0, ";\n")
+		p.line++
+		return
+	default:
+		panic("parser: unknown field comment")
 	}
 }
 
-func (p *parser) parseEnumType(lvl int) {
+func (p *parser) parseEnum(lvl int) {
+	i := p.next()
+	if i.t != itemEnum {
+		panic("expected enum type")
+	}
+	p.writef(lvl, "enum %s {", i.s)
+	p.parseNewline()
 
+	// expect WS IDENT FIELDNUM (COMMENT) NEWLINE
+	// expect WS COMMENT NEWLINE
+	// expect WS NEWLINE
+	messageLevel := 0
+	for {
+		j := p.peek()
+		if j.t == itemNewline {
+			p.next()
+			continue
+		}
+		if j.t != itemWhitespace {
+			break
+		}
+		if messageLevel == 0 {
+			messageLevel = len(j.s)
+		}
+		if len(j.s) < messageLevel {
+			// bug: actually okay if the next thing is a newline?
+			break
+		}
+		p.next() // consume ws
+		j = p.next()
+		if j.t == itemIdentifier {
+			k := p.next()
+			if k.t != itemFieldNum {
+				panic("expected field num")
+			}
+			p.writef(messageLevel, "%s = %s;", j.s, k.s)
+		} else if j.t == itemCommentStart {
+			p.writef(messageLevel, "// %s", j.s[2:])
+		}
+		j = p.peek()
+		if j.t == itemCommentStart {
+			p.next()
+			p.writef(0, " // %s", j.s)
+		}
+		p.parseNewline()
+	}
+	p.write(lvl, "}\n")
+}
+
+func (p *parser) parseOneof(lvl int) {
+	i := p.next()
+	if i.t != itemOneof {
+		panic("expected oneof type")
+	}
+	p.writef(lvl, "oneof %s {", i.s)
+	p.parseNewline()
+
+	messageLevel := 0
+	for {
+		j := p.peek()
+		if j.t == itemNewline {
+			p.next()
+			continue
+		}
+		if j.t != itemWhitespace {
+			break
+		}
+		if messageLevel == 0 {
+			messageLevel = len(j.s)
+		}
+		if len(j.s) < messageLevel {
+			// bug: actually okay if the next thing is a newline?
+			break
+		}
+		p.next() // consume ws
+		p.parseField(messageLevel)
+	}
+	p.write(lvl, "}\n")
 }
